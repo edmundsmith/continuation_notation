@@ -10,7 +10,11 @@ use syn::punctuated::{Punctuated, Pair};
 use proc_macro2::*;
 use quote::*;
 
+//The macro uses 'cont' as abbreviation for 'continuation syntax'
 const INVOCATION_NAME : &'static str = "cont";
+
+//Trying to parse an Expr with trailing Parens(Punct(Args,Comma)) needs
+//a separator to avoid parsing it as an ExprCall(OrigExpr,Args)
 type SEP = Token![,];
 
 #[proc_macro_attribute]
@@ -27,6 +31,7 @@ pub fn use_cps(_attr:proc_macro::TokenStream, body:proc_macro::TokenStream) -> p
     }).into()
 }
 
+///For parsing call parameters that may also contain a hole/_ token
 #[derive(Debug, Clone)]
 enum ContArg {
     Expr(Expr),
@@ -40,6 +45,8 @@ impl syn::parse::Parse for ContArg {
     }
 }
 
+///Contains the details of the cont! call within the #[use_cps] body
+///Parsed from `cont!(func_expr, (args*) as cont_patterns)`
 #[derive(Debug, Clone)]
 struct ParsedInvocation {
     func_expr: Expr,
@@ -72,15 +79,18 @@ impl syn::parse::Parse for ParsedInvocation {
     }
 }
 
+///Visitor for Fold that performs the block -> closure transform
 struct Folder;
 
 impl syn::fold::Fold for Folder {
+    //Walk over the block; if a cont! is found, feed it the unwalked remainder
     fn fold_block(&mut self, block:Block) -> Block {
         let mut replacement = Block { brace_token: block.brace_token, stmts: Vec::new() }; 
         let mut refold_needed = false;
         for (i, stmt) in block.stmts.iter().enumerate() {
             
             match stmt {
+                //Duplicate logic over similar structure...
                 Stmt::Semi(Expr::Macro(em), semi) => {
                     let callexpr = construct_exprcall_from_macro(em.clone(), i, &block.stmts);
                     match callexpr {
@@ -121,13 +131,16 @@ impl syn::fold::Fold for Folder {
     }
 }
 
+///Common code for taking a macro `e` and its position `i` in the block `stmts`
+///and constructing the replacement closure call from it
 fn construct_exprcall_from_macro(e:ExprMacro,i:usize,stmts:&Vec<Stmt>) -> Option<Expr> {
     let makro = &e.mac;
     if !makro.path.is_ident(INVOCATION_NAME) {
         return None
     }
+    //From here onwards, a parse error is an error in the cont! call
     let parsed_invocation: ParsedInvocation = parse2(makro.tokens.clone()).unwrap();
-    println!("Parsed cont invocation {:?}", parsed_invocation);
+    //println!("Parsed cont invocation {:?}", parsed_invocation);
     let asyncness: Option<Token![async]> = parsed_invocation.asyncness;
     let staticness: Option<Token![static]> = None;
     let captures: Option<Token![move]> = parsed_invocation.moves;
@@ -140,7 +153,7 @@ fn construct_exprcall_from_macro(e:ExprMacro,i:usize,stmts:&Vec<Stmt>) -> Option
         or1_token: Default::default(),
         inputs: parsed_invocation.cont_patterns,
         or2_token: Default::default(),
-        output: ReturnType::Default,
+        output: ReturnType::Default, //Infer return type
         body: Box::new(Expr::Block(ExprBlock{
             attrs: Vec::new(),
             label: None,
@@ -150,21 +163,24 @@ fn construct_exprcall_from_macro(e:ExprMacro,i:usize,stmts:&Vec<Stmt>) -> Option
             }
         }))
     });
-    let hole_filler: &Fn(ContArg)->Expr = &|a| match a {
+    //Replaces holes in the continue call's args with the formed closure
+    let hole_filler: &dyn Fn(ContArg)->Expr = &|a| match a {
         ContArg::Hole(_) => formed_closure.clone(),
         ContArg::Expr(e) => e.clone()
     };
-    let replaced_args = Punctuated::<Expr, Token![,]>::from_iter(parsed_invocation.args.into_pairs()
+    let replaced_args = Punctuated::<Expr, Token![,]>::from_iter(
+        parsed_invocation.args.into_pairs()
         .map(|a| match a {
             Pair::Punctuated(e, t) => Pair::Punctuated(hole_filler(e),t),
             Pair::End(e) => Pair::End(hole_filler(e))
         }));
     let cont_call_expr = Expr::Call(ExprCall{
         func: Box::new(parsed_invocation.func_expr),
-        attrs: Default::default(),
+        //attrs: Default::default(),
+        attrs: e.attrs,
         paren_token: Default::default(),
         args: replaced_args,
     });
-    println!("Newly formed continuation call:\n{}", cont_call_expr.to_token_stream().to_string());
+    //println!("Newly formed continuation call:\n{}", cont_call_expr.to_token_stream().to_string());
     Some(cont_call_expr)
 }
