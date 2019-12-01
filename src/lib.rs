@@ -1,4 +1,5 @@
-#![feature(custom_attribute)]
+#![feature(register_attr)]
+#![register_attr(use_cps)]
 extern crate continue_notation_macro;
 
 pub use continue_notation_macro::use_cps;
